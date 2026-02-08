@@ -45,6 +45,8 @@ export default class MainScene extends Scene {
   private pendingInputs: PredictedInput[] = [];
   private inputSeq: number = 0;
   private readonly RENDER_DELAY = 100; // ms
+  private serverTimeOffset = 0;
+  private hasTimeOffset = false;
 
   constructor() {
     super("WorldScene");
@@ -131,6 +133,11 @@ export default class MainScene extends Scene {
     });
 
     socket.on("STATE_SNAPSHOT", ({ users, timestamp }) => {
+      if (!this.hasTimeOffset) {
+        this.serverTimeOffset = Date.now() - timestamp;
+        this.hasTimeOffset = true;
+        console.log(`[NET] Time sync established. Offset: ${this.serverTimeOffset}ms`);
+      }
       this.syncPlayers(users, timestamp);
     });
   }
@@ -302,7 +309,7 @@ export default class MainScene extends Scene {
   }
 
   private updateRemotePlayers() {
-    const renderTime = Date.now() - this.RENDER_DELAY;
+    const renderTime = Date.now() - this.serverTimeOffset - this.RENDER_DELAY;
 
     for (const [id, sprite] of this.players) {
       if (id === this.myId) continue;

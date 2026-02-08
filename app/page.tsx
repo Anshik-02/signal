@@ -2,7 +2,7 @@
 
 import dynamic from 'next/dynamic';
 
-const PhaserGame = dynamic(() => import('@/src/game/components/phase-games'), {
+const PhaserGame = dynamic(() => import('@/public/src/game/components/phase-games'), {
   ssr: false,
 });
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Game } from 'phaser';
-import config from '@/src/config';
+import config from '@/public/src/config';
 import { socket } from '../network/socket';
 
 
@@ -13,12 +13,30 @@ const PhaserGame = () => {
   const [playerName, setPlayerName] = useState('');
   const [isJoined, setIsJoined] = useState(false);
   const [showWheel, setShowWheel] = useState(false);
+  const [isConnected, setIsConnected] = useState(socket.connected);
 
   useEffect(() => {
     (window as any).isEmoteWheelOpen = showWheel;
   }, [showWheel]);
 
   useEffect(() => {
+    const onConnect = () => {
+      console.log("[SOCKET] Connected to server");
+      setIsConnected(true);
+    };
+    const onDisconnect = (reason: string) => {
+      console.log("[SOCKET] Disconnected:", reason);
+      setIsConnected(false);
+    };
+    const onConnectError = (err: any) => {
+      console.error("[SOCKET] Connection Error:", err);
+      setIsConnected(false);
+    };
+
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    socket.on("connect_error", onConnectError);
+
     if (isJoined && gameRef.current && !game) {
       config.parent = gameRef.current;
       game = new Game(config);
@@ -38,6 +56,9 @@ const PhaserGame = () => {
     }
 
     return () => {
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
+      socket.off("connect_error", onConnectError);
       window.removeEventListener('keydown', handleKeyDown);
       if (game) {
         game.destroy(true);
@@ -92,9 +113,10 @@ const PhaserGame = () => {
 
           {/* Header Area */}
           <div className="text-center mb-10">
-            <div className="inline-block px-3 py-1 bg-blue-500/10 border border-blue-500/20 rounded-full mb-4">
-              <span className="text-[10px] font-bold text-blue-400 uppercase tracking-[0.3em] ml-1">
-                System Initializing...
+            <div className="inline-block px-3 py-1 bg-blue-500/10 border border-blue-500/20 rounded-full mb-4 flex items-center gap-2">
+              <div className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
+              <span className="text-[10px] font-bold text-blue-400 uppercase tracking-[0.3em]">
+                {isConnected ? 'System Online' : 'System Offline'}
               </span>
             </div>
             <h1 className="text-5xl font-black text-white italic tracking-tighter">
@@ -188,6 +210,14 @@ const PhaserGame = () => {
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-[4px] pointer-events-auto"
           onClick={() => setShowWheel(false)}
         >
+          {/* Connection Status Badge */}
+          <div className="absolute top-8 px-4 py-2 bg-black/40 backdrop-blur-md rounded-full border border-white/10 flex items-center gap-3">
+            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-500 shadow-[0_0_8px_#ef4444] animate-pulse'}`} />
+            <span className="text-[10px] text-white/70 font-bold tracking-[0.2em] uppercase">
+              {isConnected ? 'Signal Synchronized' : 'Signal Lost - Reconnecting'}
+            </span>
+          </div>
+
           <div
             className="relative w-96 h-96 flex items-center justify-center"
             onClick={(e) => e.stopPropagation()}
