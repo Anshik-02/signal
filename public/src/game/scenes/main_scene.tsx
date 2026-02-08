@@ -47,6 +47,9 @@ export default class MainScene extends Scene {
   private readonly RENDER_DELAY = 100; // ms
   private serverTimeOffset = 0;
   private hasTimeOffset = false;
+  private rtt = 0;
+  private lastPingTime = 0;
+  private pingInterval!: NodeJS.Timeout;
 
   constructor() {
     super("WorldScene");
@@ -111,6 +114,9 @@ export default class MainScene extends Scene {
       console.log("Canvas clicked - Keyboard focused");
     });
 
+    // PING/PONG for RTT measurement
+    this.socketListeners();
+
     // Emote Keyboard Listeners (Using safer event keys)
     this.input.keyboard!.on("keydown", (event: KeyboardEvent) => {
       const emoteMap: { [key: string]: string } = {
@@ -133,11 +139,19 @@ export default class MainScene extends Scene {
     });
 
     socket.on("STATE_SNAPSHOT", ({ users, timestamp }) => {
+      // Latency compensation: serverTimeOffset = clientNow - (serverTime + latency)
+      // We assume one-way latency is RTT / 2
+      const currentOffset = Date.now() - (timestamp + this.rtt / 2);
+
       if (!this.hasTimeOffset) {
-        this.serverTimeOffset = Date.now() - timestamp;
+        this.serverTimeOffset = currentOffset;
         this.hasTimeOffset = true;
-        console.log(`[NET] Time sync established. Offset: ${this.serverTimeOffset}ms`);
+        console.log(`[NET] Initial sync established. RTT: ${this.rtt}ms, Offset: ${this.serverTimeOffset}ms`);
+      } else {
+        // Slowly track the offset to account for clock drift (smoothly)
+        this.serverTimeOffset = Phaser.Math.Linear(this.serverTimeOffset, currentOffset, 0.1);
       }
+
       this.syncPlayers(users, timestamp);
     });
   }
@@ -255,36 +269,51 @@ export default class MainScene extends Scene {
   private applyReconciliation(serverX: number, serverY: number, serverDir: Direction, serverIsMoving: boolean, serverState: string, serverDanceType: string | null) {
     if (!this.player) return;
 
-    // 1. Blend instead of snap
-    const alpha = 0.4;
-    this.player.x = Phaser.Math.Linear(this.player.x, serverX, alpha);
-    this.player.y = Phaser.Math.Linear(this.player.y, serverY, alpha);
+    // 1. Calculate the "Golden Position" (where the server says we are + our un-acked inputs)
+    let goldenX = serverX;
+    let goldenY = serverY;
 
-    // 2. Replay all pending inputs
     const speed = 120; // Match server speed
+
+    this.pendingInputs.forEach((input) => {
+      const delta = input.dt / 1000;
+      let movX = input.vx;
+      let movY = input.vy;
+
+      if (movX !== 0 && movY !== 0) {
+        const length = Math.sqrt(movX * movX + movY * movY);
+        movX /= length;
+        movY /= length;
+      }
+      goldenX += movX * speed * delta;
+      goldenY += movY * speed * delta;
+    });
+
+    // 2. Measure error against our current predicted position
+    const dx = goldenX - this.player.x;
+    const dy = goldenY - this.player.y;
+    const error = Math.sqrt(dx * dx + dy * dy);
+    const ERROR_THRESHOLD = 4; // Tighter threshold due to better accuracy
+    const HARD_RESET_THRESHOLD = 128; // If we are way off, just snap
+
+    if (error > HARD_RESET_THRESHOLD) {
+      console.warn(`[NET] Hard reset triggered for ${this.myId}. Error: ${error.toFixed(2)}px`);
+      this.player.x = goldenX;
+      this.player.y = goldenY;
+      this.pendingInputs = []; // Clear desynced history
+    } else if (error > ERROR_THRESHOLD) {
+      // Apply soft correction towards the golden position
+      this.player.x += dx * 0.2; // 20% correction per frame for smoothness
+      this.player.y += dy * 0.2;
+    }
+
+    // 3. Animation and state logic
     const isLocalMoving = this.cursors.left?.isDown || this.cursors.right?.isDown || this.cursors.up?.isDown || this.cursors.down?.isDown || this.pendingInputs.length > 0;
 
     // IF moving locally, inform server to stop dance
     if (isLocalMoving && serverState === "dance") {
       socket.emit("STOP_DANCE");
     }
-
-    this.pendingInputs.forEach((input) => {
-      const delta = input.dt / 1000;
-
-      let movX = input.vx;
-      let movY = input.vy;
-
-      // Normalize if diagonal
-      if (movX !== 0 && movY !== 0) {
-        const length = Math.sqrt(movX * movX + movY * movY);
-        movX /= length;
-        movY /= length;
-      }
-
-      this.player.x += movX * speed * delta;
-      this.player.y += movY * speed * delta;
-    });
 
     // 3. Force animation logic
     this.lastDirection = serverDir;
@@ -501,7 +530,8 @@ export default class MainScene extends Scene {
     else if (this.cursors.down?.isDown) inputVy = 1;
 
     // 1. Prediction (Local Movement)
-    const dt = this.game.loop.delta;
+    const rawDt = this.game.loop.delta;
+    const dt = Math.min(rawDt, 100); // CAP: Prevent teleporting on first frame
     const delta = dt / 1000;
 
     if (inputVx !== 0 || inputVy !== 0) {
@@ -571,5 +601,23 @@ export default class MainScene extends Scene {
 
     // Optional depth sorting
     this.player.setDepth(this.player.y);
+  }
+
+  private socketListeners() {
+    socket.on("PONG", (originalTime: number) => {
+      this.rtt = Date.now() - originalTime;
+    });
+
+    // Initial ping
+    socket.emit("PING", Date.now());
+
+    // Continuous ping every 3 seconds for RTT tracking
+    this.pingInterval = setInterval(() => {
+      socket.emit("PING", Date.now());
+    }, 3000);
+
+    this.events.on("destroy", () => {
+      clearInterval(this.pingInterval);
+    });
   }
 }
